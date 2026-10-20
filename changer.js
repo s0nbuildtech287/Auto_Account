@@ -1,26 +1,25 @@
 /**
- * changer.js — Core: đăng nhập + đổi mật khẩu 1 tài khoản
- * Dùng playwright-extra + stealth plugin để bypass Cloudflare Turnstile
+ * changer.js — Core: dang nhap + doi mat khau 1 tai khoan
+ * Dung Chrome that (real browser) qua CDP remote debugging
+ * → Cloudflare Turnstile pass binh thuong vi dung Chrome that
  */
 'use strict';
 
-const { chromium } = require('playwright-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const fs = require('fs');
+const { chromium } = require('playwright');
+const fs   = require('fs');
 const path = require('path');
 
-// Gắn stealth plugin — patch hàng chục fingerprint signals
-chromium.use(StealthPlugin());
-
-const LOGIN_URL    = 'https://forum.ngocrongonline.com/app/dang-nhap';
+const LOGIN_URL     = 'https://forum.ngocrongonline.com/app/dang-nhap';
 const CHANGE_PW_URL = 'https://forum.ngocrongonline.com/app/doi-mat-khau';
+const CDP_ENDPOINT  = 'http://localhost:9222';
 
 const TIMEOUT = {
   NAV:           30000,
-  LOGIN_WAIT:    90000,  // chờ user pass Turnstile tối đa 90s
+  LOGIN_WAIT:    90000,  // cho user pass Turnstile
   ELEMENT:       10000,
   AFTER_SUBMIT:  8000,
-  TURNSTILE_POLL: 2000,  // poll mỗi 2s kiểm tra token
+  POLL:          1500,   // poll turnstile token
+  TURNSTILE_MAX: 60000,  // toi da cho turnstile
   LOGIN_RETRY:   3,
 };
 
@@ -29,50 +28,38 @@ const TIMEOUT = {
  * @param {string}  opts.username
  * @param {string}  opts.oldPassword
  * @param {string}  opts.newPassword
- * @param {boolean} opts.headless      — false = mở browser (default)
+ * @param {boolean} opts.headless   — bi bo qua khi dung Chrome that
  * @param {string}  opts.screenshotDir
  * @returns {Promise<{success: boolean|null, message: string}>}
  */
 async function changePassword({ username, oldPassword, newPassword, headless = false, screenshotDir = 'screenshots' }) {
-  let browser, context, page;
+  let browser, page;
 
-  // Lưu API response từ các POST/PUT/PATCH calls
   const apiResponses = [];
 
   try {
-    browser = await chromium.launch({
-      headless,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-      ],
-    });
+    // ── Connect vao Chrome that qua CDP ───────────────────────────────
+    browser = await chromium.connectOverCDP(CDP_ENDPOINT);
 
-    context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      locale: 'vi-VN',
-      viewport: { width: 1280, height: 800 },
-      extraHTTPHeaders: { 'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8' },
-    });
+    // Lay context mac dinh (window dang mo)
+    const contexts = browser.contexts();
+    const context  = contexts.length > 0 ? contexts[0] : await browser.newContext();
 
+    // Mo tab moi de tranh lam phien tab khac
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT.ELEMENT);
 
-    // Intercept POST/PUT/PATCH để bắt API response
-    page.on('response', async (res) => {
-      const method = res.request().method();
-      if (['POST', 'PUT', 'PATCH'].includes(method)) {
+    // Intercept responses
+    page.on('response', async res => {
+      if (['POST', 'PUT', 'PATCH'].includes(res.request().method())) {
         try {
           const json = await res.json();
           apiResponses.push({ url: res.url(), status: res.status(), body: json });
-        } catch {
-          // non-JSON response, bỏ qua
-        }
+        } catch {}
       }
     });
 
-    // ── BƯỚC 1: Đăng nhập (stealth + retry) ────────────────────────────
+    // ── BUOC 1: Dang nhap (retry 3 lan) ──────────────────────────────
     let loginSuccess = false;
     let loginError   = '';
 
@@ -80,63 +67,57 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       console.log(`  [Login ${attempt}/${TIMEOUT.LOGIN_RETRY}] ${username}`);
 
       await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT.NAV });
+      await page.waitForTimeout(2000);
 
-      // Chờ page ổn định + Turnstile iframe load xong
-      await page.waitForTimeout(2500);
-
+      // Dien credentials
       await page.fill('input[name="user"]', username);
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(200);
       await page.fill('input[name="pass"]', oldPassword);
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(200);
 
-      // Chờ Turnstile tự resolve (stealth plugin giúp pass)
-      // Poll hidden input — tối đa 30s trước khi submit
-      const tokenOk = await _pollTurnstileToken(page, 30000, TIMEOUT.TURNSTILE_POLL);
-      if (!tokenOk) {
-        console.log(`  [Turnstile] Chua co token sau 30s, submit thu...`);
+      // Cho Turnstile tu resolve (Chrome that → pass rat nhanh)
+      console.log(`  [Turnstile] Cho token...`);
+      const gotToken = await _pollToken(page, TIMEOUT.TURNSTILE_MAX, TIMEOUT.POLL);
+      if (!gotToken) {
+        console.log(`  [Turnstile] Khong lay duoc token — thu submit thang...`);
       } else {
         console.log(`  [Turnstile] Token OK!`);
       }
 
-      // Reset API log
-      apiResponses.length = 0;
-
       // Submit
+      apiResponses.length = 0;
       await page.click('button[type="submit"]:has-text("ĐĂNG NHẬP NGAY")');
 
-      // Chờ redirect khỏi trang login
       try {
         await page.waitForURL(
-          (url) => !url.toString().includes('dang-nhap'),
+          url => !url.toString().includes('dang-nhap'),
           { timeout: TIMEOUT.LOGIN_WAIT }
         );
         loginSuccess = true;
+        console.log(`  [Login] Thanh cong! URL: ${page.url()}`);
         break;
 
       } catch {
-        // Phân tích lý do fail
-        const errOnPage = await _getPageError(page);
+        const errText = await _getErrorText(page);
 
-        // Lỗi Turnstile hiện trên trang → retry
-        if (errOnPage.toLowerCase().includes('xac minh') ||
-            errOnPage.toLowerCase().includes('turnstile') ||
-            errOnPage.toLowerCase().includes('khac phuc')) {
-          loginError = `Turnstile fail (attempt ${attempt})`;
-          console.log(`  [Turnstile] Xac minh that bai — retry ${attempt + 1}...`);
+        // Turnstile fail → retry
+        if (_isTurnstileError(errText)) {
+          loginError = `Turnstile fail attempt ${attempt}`;
+          console.log(`  [Turnstile] Xac minh that bai, retry...`);
           await page.waitForTimeout(2000);
           continue;
         }
 
-        // Lỗi sai mật khẩu → không retry
-        const apiErr = apiResponses.find(r =>
+        // Sai mat khau → khong retry
+        const apiResp = apiResponses.find(r =>
           r.url.includes('login') || r.url.includes('auth') || r.url.includes('dang-nhap'));
-        const apiMsg = apiErr?.body?.message || apiErr?.body?.error || '';
+        const apiMsg = apiResp?.body?.message || apiResp?.body?.error || '';
 
         if (apiMsg) {
           loginError = `Login that bai: ${apiMsg}`;
-          if (apiMsg.match(/sai|incorrect|wrong|invalid/i)) break;
+          if (/sai|incorrect|wrong|invalid/i.test(apiMsg)) break;
         } else {
-          loginError = errOnPage || `Timeout ${TIMEOUT.LOGIN_WAIT / 1000}s`;
+          loginError = errText || `Timeout ${TIMEOUT.LOGIN_WAIT / 1000}s`;
         }
 
         if (attempt < TIMEOUT.LOGIN_RETRY) {
@@ -147,174 +128,67 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
     }
 
     if (!loginSuccess) {
+      await page.close().catch(() => {});
       return { success: false, message: loginError || 'Login that bai' };
     }
 
-    console.log('  [Login] Thanh cong!');
     apiResponses.length = 0;
 
-    // ── BƯỚC 2: Mở trang đổi mật khẩu ───────────────────────────────────
+    // ── BUOC 2: Mo trang doi mat khau ────────────────────────────────
     await page.goto(CHANGE_PW_URL, { waitUntil: 'networkidle', timeout: TIMEOUT.NAV });
     await page.waitForTimeout(1500);
 
-    // Kiểm tra bị redirect không
     if (!page.url().includes('doi-mat-khau')) {
-      return { success: false, message: `Redirect khỏi trang đổi mật khẩu. URL: ${page.url()} — Có thể session hết hạn hoặc tài khoản không hợp lệ` };
+      await page.close().catch(() => {});
+      return { success: false, message: `Khong vao duoc trang doi mat khau. URL: ${page.url()}` };
     }
 
-    // ── BƯỚC 3: Tìm và điền form ─────────────────────────────────────────
+    // ── BUOC 3: Dien form ─────────────────────────────────────────────
     const pwInputs = await page.$$('input[type="password"]');
-
     if (pwInputs.length === 0) {
       await _screenshot(page, screenshotDir, username + '_no_form');
-      return { success: false, message: 'Không tìm thấy form đổi mật khẩu trên trang' };
+      await page.close().catch(() => {});
+      return { success: false, message: 'Khong tim thay form doi mat khau' };
     }
 
-    // Phân loại inputs theo name/placeholder
-    const classified = await classifyPasswordInputs(pwInputs);
-
-    // Điền theo kết quả classify
+    const classified = await _classifyInputs(pwInputs);
     if (classified.old) await classified.old.fill(oldPassword);
-    if (classified.new) await classified.new.fill(newPassword);
+    if (classified.new)  await classified.new.fill(newPassword);
     if (classified.confirm) await classified.confirm.fill(newPassword);
 
     await page.waitForTimeout(400);
 
-    // ── BƯỚC 4: Submit ───────────────────────────────────────────────────
-    const submitBtn = await findSubmitButton(page);
+    // ── BUOC 4: Submit ────────────────────────────────────────────────
+    const submitBtn = await _findSubmit(page);
     if (!submitBtn) {
       await _screenshot(page, screenshotDir, username + '_no_submit');
-      return { success: false, message: 'Không tìm thấy nút submit' };
+      await page.close().catch(() => {});
+      return { success: false, message: 'Khong tim thay nut submit' };
     }
 
     await submitBtn.click();
-
-    // Chờ API response
     await page.waitForTimeout(TIMEOUT.AFTER_SUBMIT);
 
-    // ── BƯỚC 5: Xét kết quả từ API response ─────────────────────────────
-    if (apiResponses.length > 0) {
-      const lastResp = apiResponses[apiResponses.length - 1];
-      const body = lastResp.body;
-
-      // Detect thành công/thất bại từ JSON response
-      if (lastResp.status >= 200 && lastResp.status < 300) {
-        const msg = body?.message || body?.msg || body?.data?.message || '';
-        const isOk = body?.success === true || body?.status === 'success' || body?.ok === true ||
-          (typeof msg === 'string' && msg.toLowerCase().match(/thành công|success/));
-        const isFail = body?.success === false || body?.status === 'error' || body?.error ||
-          (typeof msg === 'string' && msg.toLowerCase().match(/thất bại|lỗi|error|fail/));
-
-        if (isOk) return { success: true, message: `Đổi mật khẩu thành công${msg ? ': ' + msg : ''}` };
-        if (isFail) return { success: false, message: `Đổi mật khẩu thất bại: ${msg || body?.error || 'Server trả lỗi'}` };
-
-        // HTTP 2xx nhưng không rõ success/fail → coi là thành công
-        return { success: true, message: `Đã submit (HTTP ${lastResp.status}): ${msg || JSON.stringify(body).substring(0, 80)}` };
-      }
-
-      if (lastResp.status >= 400) {
-        const msg = body?.message || body?.error || body?.msg || `HTTP ${lastResp.status}`;
-        return { success: false, message: `Đổi mật khẩu thất bại: ${msg}` };
-      }
-    }
-
-    // Fallback: kiểm tra text trên trang
-    const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
-    const lower = pageText.toLowerCase();
-    const successPhrases = ['thành công', 'đổi mật khẩu thành công', 'thay đổi thành công', 'cập nhật thành công', 'success'];
-    const errorPhrases = ['sai mật khẩu', 'không đúng', 'lỗi', 'error', 'thất bại', 'không hợp lệ', 'failed'];
-
-    if (successPhrases.some(p => lower.includes(p))) {
-      return { success: true, message: 'Đổi mật khẩu thành công (text match)' };
-    }
-    if (errorPhrases.some(p => lower.includes(p))) {
-      const errEl = await page.$('[class*="error"], [class*="alert"], .toast').catch(() => null);
-      const errText = errEl ? await errEl.textContent().catch(() => '') : '';
-      return { success: false, message: `Đổi mật khẩu thất bại: ${errText.trim() || 'có lỗi xảy ra'}` };
-    }
-
-    // Không xác định — chụp screenshot
-    await _screenshot(page, screenshotDir, username + '_unknown');
-    return { success: null, message: 'Không xác định được kết quả — xem screenshot trong thư mục screenshots/' };
+    // ── BUOC 5: Ket qua ───────────────────────────────────────────────
+    const result = await _detectResult(page, apiResponses);
+    await page.close().catch(() => {});
+    return result;
 
   } catch (err) {
-    if (page) await _screenshot(page, screenshotDir, username + '_exception').catch(() => {});
+    if (page) {
+      await _screenshot(page, screenshotDir, username + '_exception').catch(() => {});
+      await page.close().catch(() => {});
+    }
     return { success: false, message: `Exception: ${err.message}` };
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    // KHONG dong browser — vi la Chrome that dang chay
+    // chi close tab (da dong o tren)
   }
 }
 
-/**
- * Phân loại password inputs theo name/placeholder/id
- */
-async function classifyPasswordInputs(inputs) {
-  const result = { old: null, new: null, confirm: null };
+// ── Helpers ────────────────────────────────────────────────────────────────
 
-  for (const input of inputs) {
-    const attrs = await input.evaluate(el => ({
-      name: (el.name || '').toLowerCase(),
-      placeholder: (el.placeholder || '').toLowerCase(),
-      id: (el.id || '').toLowerCase(),
-    }));
-    const combined = `${attrs.name} ${attrs.placeholder} ${attrs.id}`;
-
-    if (combined.match(/old|current|cu\b|hien|mat.?khau.?cu|password.?old|pass.?old/)) {
-      result.old = input;
-    } else if (combined.match(/confirm|nhap.?lai|xac.?nhan|again|retype|re.?password|verify/)) {
-      result.confirm = input;
-    } else {
-      result.new = result.new || input; // first unclassified = new password
-    }
-  }
-
-  // Fallback theo thứ tự index
-  if (!result.new) {
-    if (inputs.length === 3 && !result.old) {
-      [result.old, result.new, result.confirm] = inputs;
-    } else if (inputs.length === 2 && !result.confirm) {
-      [result.new, result.confirm] = inputs;
-    } else if (inputs.length === 1) {
-      result.new = inputs[0];
-    }
-  }
-
-  // Nếu chỉ có old và new nhưng không có confirm
-  if (!result.confirm && inputs.length === 3) {
-    result.confirm = inputs.find(i => i !== result.old && i !== result.new) || null;
-  }
-
-  return result;
-}
-
-/**
- * Tìm nút submit phù hợp nhất
- */
-async function findSubmitButton(page) {
-  // Ưu tiên button trong form có password input
-  const candidates = [
-    'button[type="submit"]:has-text("Đổi mật khẩu")',
-    'button[type="submit"]:has-text("Đổi")',
-    'button[type="submit"]:has-text("Lưu")',
-    'button[type="submit"]:has-text("Cập nhật")',
-    'button[type="submit"]:has-text("Xác nhận")',
-    'button[type="submit"]:has-text("Thay đổi")',
-    'input[type="submit"]',
-    'button[type="submit"]',
-  ];
-
-  for (const selector of candidates) {
-    const el = await page.$(selector).catch(() => null);
-    if (el) return el;
-  }
-  return null;
-}
-
-/**
- * Poll hidden input cf-turnstile-response đến khi có token hoặc hết maxWait
- * @returns {Promise<boolean>}
- */
-async function _pollTurnstileToken(page, maxWait, interval) {
+async function _pollToken(page, maxWait, interval) {
   const deadline = Date.now() + maxWait;
   while (Date.now() < deadline) {
     const token = await page.evaluate(() => {
@@ -327,28 +201,106 @@ async function _pollTurnstileToken(page, maxWait, interval) {
   return false;
 }
 
-/**
- * Lấy error text hiển thị trên trang (nếu có)
- */
-async function _getPageError(page) {
+async function _getErrorText(page) {
   return page.evaluate(() => {
-    const selectors = [
-      '[class*="error"]', '[class*="alert"]', '[class*="warning"]',
-      '.toast', '.notification', '[class*="message"]',
-    ];
-    for (const s of selectors) {
+    const sels = ['[class*="error"]','[class*="alert"]','[class*="warning"]','.toast','.message'];
+    for (const s of sels) {
       const el = document.querySelector(s);
-      if (el && el.textContent.trim()) return el.textContent.trim();
+      if (el?.textContent?.trim()) return el.textContent.trim();
     }
     return '';
   }).catch(() => '');
 }
 
+function _isTurnstileError(text) {
+  const t = (text || '').toLowerCase();
+  return t.includes('xac minh') || t.includes('turnstile') ||
+         t.includes('khac phuc') || t.includes('verification') ||
+         t.includes('robot');
+}
+
+async function _classifyInputs(inputs) {
+  const result = { old: null, new: null, confirm: null };
+  for (const input of inputs) {
+    const attrs = await input.evaluate(el => ({
+      name: (el.name || '').toLowerCase(),
+      placeholder: (el.placeholder || '').toLowerCase(),
+      id: (el.id || '').toLowerCase(),
+    }));
+    const combined = `${attrs.name} ${attrs.placeholder} ${attrs.id}`;
+    if (/old|current|cu\b|hien|mat.?khau.?cu/.test(combined)) {
+      result.old = input;
+    } else if (/confirm|nhap.?lai|xac.?nhan|again|retype|re.?pass/.test(combined)) {
+      result.confirm = input;
+    } else {
+      result.new = result.new || input;
+    }
+  }
+  // Fallback theo thu tu
+  if (!result.new) {
+    if (inputs.length === 3) [result.old, result.new, result.confirm] = inputs;
+    else if (inputs.length === 2) [result.new, result.confirm] = inputs;
+    else result.new = inputs[0];
+  }
+  if (!result.confirm && inputs.length === 3) {
+    result.confirm = inputs.find(i => i !== result.old && i !== result.new) || null;
+  }
+  return result;
+}
+
+async function _findSubmit(page) {
+  const candidates = [
+    'button[type="submit"]:has-text("Đổi mật khẩu")',
+    'button[type="submit"]:has-text("Đổi")',
+    'button[type="submit"]:has-text("Lưu")',
+    'button[type="submit"]:has-text("Cập nhật")',
+    'button[type="submit"]:has-text("Xác nhận")',
+    'button[type="submit"]:has-text("Thay đổi")',
+    'input[type="submit"]',
+    'button[type="submit"]',
+  ];
+  for (const sel of candidates) {
+    const el = await page.$(sel).catch(() => null);
+    if (el) return el;
+  }
+  return null;
+}
+
+async function _detectResult(page, apiResponses) {
+  // Uu tien ket qua tu API response
+  if (apiResponses.length > 0) {
+    const last = apiResponses[apiResponses.length - 1];
+    const body = last.body;
+    const msg  = body?.message || body?.msg || body?.data?.message || '';
+
+    if (last.status >= 200 && last.status < 300) {
+      const ok   = body?.success === true || /thanh.cong|success/i.test(msg);
+      const fail = body?.success === false || /that.bai|loi|error|fail/i.test(msg);
+      if (ok)   return { success: true,  message: `Doi mat khau thanh cong: ${msg || 'OK'}` };
+      if (fail) return { success: false, message: `Doi mat khau that bai: ${msg}` };
+      return { success: true, message: `Submitted (HTTP ${last.status})` };
+    }
+    if (last.status >= 400) {
+      return { success: false, message: `HTTP ${last.status}: ${msg || JSON.stringify(body).slice(0,80)}` };
+    }
+  }
+
+  // Fallback: doc text trang
+  const text  = await page.evaluate(() => document.body.innerText).catch(() => '');
+  const lower = text.toLowerCase();
+  if (/thành công|doi mat khau thanh cong|cap nhat thanh cong|success/.test(lower))
+    return { success: true, message: 'Doi mat khau thanh cong' };
+  if (/sai mat khau|khong dung|loi|error|that bai/.test(lower))
+    return { success: false, message: 'Doi mat khau that bai (text match)' };
+
+  await _screenshot(page, 'screenshots', `unknown_${Date.now()}`);
+  return { success: null, message: 'Khong xac dinh duoc ket qua — xem screenshots/' };
+}
+
 async function _screenshot(page, dir, name) {
   try {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `${name}_${Date.now()}.png`);
-    await page.screenshot({ path: file, fullPage: true });
+    await page.screenshot({ path: path.join(dir, `${name}.png`), fullPage: true });
   } catch {}
 }
 
