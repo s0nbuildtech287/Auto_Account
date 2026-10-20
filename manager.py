@@ -430,6 +430,26 @@ class App(tk.Tk):
 
         SectionLabel(card, "Run Settings").pack(anchor="w", pady=(0, 10))
 
+        # ── Chrome status + Launch button ──
+        chrome_row = tk.Frame(card, bg=BG_CARD)
+        chrome_row.pack(fill="x", pady=(0, 8))
+
+        self._chrome_dot = tk.Label(chrome_row, text="●", font=("Segoe UI", 12),
+                                     bg=BG_CARD, fg=DANGER)
+        self._chrome_dot.pack(side="left")
+
+        self._chrome_lbl = tk.Label(chrome_row, text=" Chrome: not running",
+                                     font=F_SMALL, bg=BG_CARD, fg=TEXT2, anchor="w")
+        self._chrome_lbl.pack(side="left", fill="x", expand=True)
+
+        self._btn_chrome = HoverButton(chrome_row, text=" Launch ",
+                                        font=F_SMALL,
+                                        bg_normal=INFO, bg_hover="#3a8ee8", fg="#fff",
+                                        command=self._launch_chrome)
+        self._btn_chrome.pack(side="right")
+
+        tk.Frame(card, bg=BORDER, height=1).pack(fill="x", pady=(0, 8))
+
         # Headless toggle
         r1 = tk.Frame(card, bg=BG_CARD)
         r1.pack(fill="x", pady=2)
@@ -474,6 +494,9 @@ class App(tk.Tk):
                                       bg_normal=DANGER, bg_hover=DANGER_DK, fg="#ffffff",
                                       command=self._stop, state="disabled")
         self._btn_stop.pack(fill="x", ipady=7)
+
+        # Poll Chrome status moi 3s
+        self._poll_chrome_status()
 
     def _setup_progress_style(self):
         s = ttk.Style(self)
@@ -664,12 +687,68 @@ class App(tk.Tk):
         self.entry_old_w.config(show=show)
         self.entry_new_w.config(show=show)
 
+    # ── Chrome control ────────────────────────────────────────────────────────
+    def _is_chrome_running(self):
+        try:
+            import urllib.request
+            urllib.request.urlopen("http://localhost:9222/json/version", timeout=1)
+            return True
+        except:
+            return False
+
+    def _launch_chrome(self):
+        if self._is_chrome_running():
+            self._log("Chrome debug da chay roi!", "ok")
+            return
+        chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        user_data = os.path.join(os.environ.get("TEMP", r"C:\Temp"), "chrome-auto")
+        try:
+            subprocess.Popen([
+                chrome,
+                "--remote-debugging-port=9222",
+                f"--user-data-dir={user_data}",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ])
+            self._log("Dang mo Chrome... cho 3s", "info")
+            self.after(3000, self._poll_chrome_status)
+        except FileNotFoundError:
+            self._log("Khong tim thay Chrome!", "fail")
+            messagebox.showerror("Error", f"Khong tim thay:\n{chrome}")
+
+    def _poll_chrome_status(self):
+        """Cap nhat dot mau + label Chrome status moi 3 giay."""
+        ok = self._is_chrome_running()
+        if ok:
+            self._chrome_dot.config(fg=SUCCESS)
+            self._chrome_lbl.config(text=" Chrome: ready (port 9222)", fg=SUCCESS)
+            self._btn_chrome.config(text=" OK ", state="disabled")
+            self._btn_chrome.set_colors(SUCCESS_DK, SUCCESS_DK)
+        else:
+            self._chrome_dot.config(fg=DANGER)
+            self._chrome_lbl.config(text=" Chrome: not running", fg=TEXT2)
+            self._btn_chrome.config(text=" Launch ", state="normal")
+            self._btn_chrome.set_colors(INFO, "#3a8ee8")
+        self.after(3000, self._poll_chrome_status)
+
     # ── Run / Stop ────────────────────────────────────────────────────────────
     def _run(self):
         if not self._rows:
             messagebox.showwarning("Empty list", "No accounts in the list.")
             return
         if self._running:
+            return
+        if not self._is_chrome_running():
+            if not messagebox.askyesno(
+                "Chrome chua chay",
+                "Chrome debug (port 9222) chua duoc bat.\n\n"
+                "Bam 'Yes' de tu dong bat Chrome roi chay.\n"
+                "Bam 'No' de huy."
+            ):
+                return
+            self._launch_chrome()
+            # Cho Chrome bat xong roi moi chay
+            self.after(4000, self._run)
             return
         self._running = True
         self._status_map = {}
