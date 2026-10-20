@@ -1,24 +1,27 @@
 /**
  * changer.js — Core: đăng nhập + đổi mật khẩu 1 tài khoản
- * Tự detect selectors + intercept API response để xác định kết quả
+ * Dùng playwright-extra + stealth plugin để bypass Cloudflare Turnstile
  */
 'use strict';
 
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const fs = require('fs');
 const path = require('path');
 
-const LOGIN_URL = 'https://forum.ngocrongonline.com/app/dang-nhap';
+// Gắn stealth plugin — patch hàng chục fingerprint signals
+chromium.use(StealthPlugin());
+
+const LOGIN_URL    = 'https://forum.ngocrongonline.com/app/dang-nhap';
 const CHANGE_PW_URL = 'https://forum.ngocrongonline.com/app/doi-mat-khau';
 
 const TIMEOUT = {
-  NAV: 30000,
-  LOGIN_WAIT: 60000,   // chờ sau khi click login (captcha)
-  ELEMENT: 10000,
-  AFTER_SUBMIT: 8000,
-  TURNSTILE: 5000,     // chờ 1 lần poll Turnstile token
-  TURNSTILE_MAX: 60000, // tổng thời gian chờ Turnstile tối đa
-  LOGIN_RETRY: 3,     // số lần retry login nếu Turnstile fail
+  NAV:           30000,
+  LOGIN_WAIT:    90000,  // chờ user pass Turnstile tối đa 90s
+  ELEMENT:       10000,
+  AFTER_SUBMIT:  8000,
+  TURNSTILE_POLL: 2000,  // poll mỗi 2s kiểm tra token
+  LOGIN_RETRY:   3,
 };
 
 /**
@@ -42,7 +45,6 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
         '--disable-dev-shm-usage',
       ],
     });
@@ -51,17 +53,9 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       locale: 'vi-VN',
       viewport: { width: 1280, height: 800 },
-      extraHTTPHeaders: {
-        'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
-      },
+      extraHTTPHeaders: { 'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8' },
     });
 
-    // Stealth: xoa webdriver flag de Cloudflare khong detect
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'languages', { get: () => ['vi-VN', 'vi', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    });
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT.ELEMENT);
 
@@ -78,44 +72,36 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       }
     });
 
-    // ── BƯỚC 1: Đăng nhập (có retry Turnstile) ─────────────────────────
+    // ── BƯỚC 1: Đăng nhập (stealth + retry) ────────────────────────────
     let loginSuccess = false;
-    let loginError = '';
+    let loginError   = '';
 
     for (let attempt = 1; attempt <= TIMEOUT.LOGIN_RETRY; attempt++) {
-      console.log(`  [Login attempt ${attempt}/${TIMEOUT.LOGIN_RETRY}] ${username}`);
+      console.log(`  [Login ${attempt}/${TIMEOUT.LOGIN_RETRY}] ${username}`);
 
       await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT.NAV });
-      await page.waitForTimeout(1500);
+
+      // Chờ page ổn định + Turnstile iframe load xong
+      await page.waitForTimeout(2500);
 
       await page.fill('input[name="user"]', username);
+      await page.waitForTimeout(300);
       await page.fill('input[name="pass"]', oldPassword);
+      await page.waitForTimeout(300);
 
-      // ── Chờ Cloudflare Turnstile render + lấy token ──────────────────
-      const turnstileResult = await waitForTurnstileToken(page, {
-        pollInterval: TIMEOUT.TURNSTILE,
-        maxWait: TIMEOUT.TURNSTILE_MAX,
-        screenshotDir,
-        username,
-        attempt,
-      });
-
-      if (!turnstileResult.ok) {
-        loginError = `Turnstile: ${turnstileResult.reason}`;
-        console.log(`  [Turnstile] ${turnstileResult.reason}`);
-        if (attempt < TIMEOUT.LOGIN_RETRY) {
-          console.log(`  [Retry] Login lại lần ${attempt + 1}...`);
-          await page.waitForTimeout(2000);
-          continue;
-        }
-        break;
+      // Chờ Turnstile tự resolve (stealth plugin giúp pass)
+      // Poll hidden input — tối đa 30s trước khi submit
+      const tokenOk = await _pollTurnstileToken(page, 30000, TIMEOUT.TURNSTILE_POLL);
+      if (!tokenOk) {
+        console.log(`  [Turnstile] Chua co token sau 30s, submit thu...`);
+      } else {
+        console.log(`  [Turnstile] Token OK!`);
       }
 
-      console.log('  [Turnstile] Token OK — submit login...');
-
-      // Reset API log trước khi submit
+      // Reset API log
       apiResponses.length = 0;
 
+      // Submit
       await page.click('button[type="submit"]:has-text("ĐĂNG NHẬP NGAY")');
 
       // Chờ redirect khỏi trang login
@@ -126,42 +112,45 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
         );
         loginSuccess = true;
         break;
+
       } catch {
-        // Kiểm tra API response
-        const loginResp = apiResponses.find(r =>
-          r.url.includes('login') || r.url.includes('dang-nhap') || r.url.includes('auth'));
-        if (loginResp?.body) {
-          const msg = loginResp.body.message || loginResp.body.error || JSON.stringify(loginResp.body);
-          loginError = `Login thất bại: ${msg}`;
-          // Nếu là lỗi sai mật khẩu → không retry
-          if (msg.toLowerCase().includes('sai') || msg.toLowerCase().includes('incorrect') ||
-              msg.toLowerCase().includes('wrong')) {
-            break;
-          }
+        // Phân tích lý do fail
+        const errOnPage = await _getPageError(page);
+
+        // Lỗi Turnstile hiện trên trang → retry
+        if (errOnPage.toLowerCase().includes('xac minh') ||
+            errOnPage.toLowerCase().includes('turnstile') ||
+            errOnPage.toLowerCase().includes('khac phuc')) {
+          loginError = `Turnstile fail (attempt ${attempt})`;
+          console.log(`  [Turnstile] Xac minh that bai — retry ${attempt + 1}...`);
+          await page.waitForTimeout(2000);
+          continue;
+        }
+
+        // Lỗi sai mật khẩu → không retry
+        const apiErr = apiResponses.find(r =>
+          r.url.includes('login') || r.url.includes('auth') || r.url.includes('dang-nhap'));
+        const apiMsg = apiErr?.body?.message || apiErr?.body?.error || '';
+
+        if (apiMsg) {
+          loginError = `Login that bai: ${apiMsg}`;
+          if (apiMsg.match(/sai|incorrect|wrong|invalid/i)) break;
         } else {
-          // Kiểm tra error message trên trang
-          const errEl = await page.$('.error, [class*="error"], .alert, [class*="alert"]').catch(() => null);
-          if (errEl) {
-            const errText = await errEl.textContent().catch(() => '');
-            loginError = `Login thất bại: ${errText.trim()}`;
-          } else {
-            loginError = `Login timeout sau ${TIMEOUT.LOGIN_WAIT / 1000}s`;
-          }
+          loginError = errOnPage || `Timeout ${TIMEOUT.LOGIN_WAIT / 1000}s`;
         }
 
         if (attempt < TIMEOUT.LOGIN_RETRY) {
-          console.log(`  [Retry] ${loginError} — thử lại lần ${attempt + 1}...`);
+          console.log(`  [Retry] ${loginError}`);
           await page.waitForTimeout(2000);
         }
       }
     }
 
     if (!loginSuccess) {
-      return { success: false, message: loginError || 'Login thất bại' };
+      return { success: false, message: loginError || 'Login that bai' };
     }
 
-    console.log('  [Login] Thành công!');
-    // Reset API log sau khi login xong
+    console.log('  [Login] Thanh cong!');
     apiResponses.length = 0;
 
     // ── BƯỚC 2: Mở trang đổi mật khẩu ───────────────────────────────────
@@ -322,41 +311,37 @@ async function findSubmitButton(page) {
 }
 
 /**
- * Chờ Cloudflare Turnstile render + lấy token.
- *
- * KHÔNG click vào Turnstile bằng code — Cloudflare detect automation click
- * và reject token. Chỉ chờ:
- *   - Headful: Turnstile thường tự pass (real browser), hoặc user click tay
- *   - Headless: Turnstile thường tự pass nếu fingerprint hợp lệ
- *
- * @returns {Promise<{ok: boolean, reason?: string, token?: string}>}
+ * Poll hidden input cf-turnstile-response đến khi có token hoặc hết maxWait
+ * @returns {Promise<boolean>}
  */
-async function waitForTurnstileToken(page, { pollInterval, maxWait, screenshotDir, username, attempt }) {
-  const start = Date.now();
-  let logged = false;
-
-  while (Date.now() - start < maxWait) {
-    // Kiểm tra hidden input cf-turnstile-response đã có token chưa
+async function _pollTurnstileToken(page, maxWait, interval) {
+  const deadline = Date.now() + maxWait;
+  while (Date.now() < deadline) {
     const token = await page.evaluate(() => {
       const el = document.querySelector('input[name="cf-turnstile-response"]');
       return el ? el.value : '';
     }).catch(() => '');
-
-    if (token && token.length > 10) {
-      return { ok: true, token };
-    }
-
-    if (!logged) {
-      console.log(`  [Turnstile] Dang cho token... (neu headful, click "I'm not a robot" neu can)`);
-      logged = true;
-    }
-
-    await page.waitForTimeout(pollInterval);
+    if (token && token.length > 10) return true;
+    await page.waitForTimeout(interval);
   }
+  return false;
+}
 
-  // Timeout — chụp screenshot để debug
-  await _screenshot(page, screenshotDir, `${username}_turnstile_timeout_a${attempt}`);
-  return { ok: false, reason: `Khong lay duoc token sau ${maxWait / 1000}s — click "I'm not a robot" thu cong neu headful` };
+/**
+ * Lấy error text hiển thị trên trang (nếu có)
+ */
+async function _getPageError(page) {
+  return page.evaluate(() => {
+    const selectors = [
+      '[class*="error"]', '[class*="alert"]', '[class*="warning"]',
+      '.toast', '.notification', '[class*="message"]',
+    ];
+    for (const s of selectors) {
+      const el = document.querySelector(s);
+      if (el && el.textContent.trim()) return el.textContent.trim();
+    }
+    return '';
+  }).catch(() => '');
 }
 
 async function _screenshot(page, dir, name) {
