@@ -1,0 +1,12 @@
+node_modules/
+screenshots/
+*.png
+*.json
+!package.json
+!package-lock.json
+accounts.csv
+session_cookies.json
+network_log.json
+api_log.json
+results.json
+.env
