@@ -224,7 +224,7 @@ class App(tk.Tk):
         body = tk.Frame(self, bg=BG_DARK)
         body.pack(fill="both", expand=True, padx=18, pady=14)
 
-        # Left column
+        # Left column — dung PanedWindow de tabs co the thu nho
         left = tk.Frame(body, bg=BG_DARK, width=300)
         left.pack(side="left", fill="y", padx=(0, 14))
         left.pack_propagate(False)
@@ -233,15 +233,17 @@ class App(tk.Tk):
         right = tk.Frame(body, bg=BG_DARK)
         right.pack(side="left", fill="both", expand=True)
 
-        self._build_tabs(left)
+        # Run panel luon o duoi, fixed height
         self._build_run_panel(left)
+        # Tabs fill phan con lai phia tren
+        self._build_tabs(left)
         self._build_table(right)
         self._build_log(right)
 
     # ── Tabs: single form + bulk import ───────────────────────────────────────
     def _build_tabs(self, parent):
         nb = ttk.Notebook(parent, style="NB.TNotebook")
-        nb.pack(fill="both", expand=True, pady=(0, 10))
+        nb.pack(fill="both", expand=True, pady=(0, 0))
 
         tab1 = tk.Frame(nb, bg=BG_CARD)
         nb.add(tab1, text="  Single Add  ")
@@ -426,7 +428,7 @@ class App(tk.Tk):
     # ── Run panel (bottom left) ────────────────────────────────────────────────
     def _build_run_panel(self, parent):
         card = Card(parent, padx=16, pady=14)
-        card.pack(fill="x", pady=(0, 0))
+        card.pack(fill="x", side="bottom", pady=(10, 0))
 
         SectionLabel(card, "Run Settings").pack(anchor="w", pady=(0, 10))
 
