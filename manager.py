@@ -512,11 +512,11 @@ class App(tk.Tk):
 
         SectionLabel(hdr, "Accounts", bg=BG_DARK).pack(side="left")
 
-        HoverButton(hdr, text=" Clear Selected ", font=F_SMALL,
-                    bg_normal=BG_INPUT, bg_hover=DANGER_DK, fg=TEXT2,
+        HoverButton(hdr, text="  Xoa chon  ", font=F_SMALL,
+                    bg_normal=DANGER, bg_hover=DANGER_DK, fg="#ffffff",
                     command=self._delete_selected).pack(side="right")
-        HoverButton(hdr, text=" Clear All ", font=F_SMALL,
-                    bg_normal=BG_INPUT, bg_hover=BG_HOVER, fg=TEXT2,
+        HoverButton(hdr, text="  Xoa tat ca  ", font=F_SMALL,
+                    bg_normal=BG_INPUT, bg_hover=DANGER_DK, fg=TEXT,
                     command=self._clear_all).pack(side="right", padx=(0, 6))
 
         # Treeview
