@@ -200,16 +200,8 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
         throw new Error('Login form unavailable at ' + page.url() + ' (' + formError.message + ')');
       }
 
-      await page.locator('input[name="user"]').fill(username);
-      await page.waitForTimeout(200);
-      await page.locator('input[name="pass"]').fill(oldPassword);
-      await page.waitForTimeout(500);
-
-      // Dien credentials
-      await page.fill('input[name="user"]', username);
-      await page.waitForTimeout(200);
-      await page.fill('input[name="pass"]', oldPassword);
-      await page.waitForTimeout(500);
+      await _fillStable(page.locator('input[name="user"]'), username, 'user');
+      await _fillStable(page.locator('input[name="pass"]'), oldPassword, 'pass');
 
       // ── Giai Turnstile ────────────────────────────────────────────
       // Buoc 1: Thu lay token tu Chrome that (da tu solve)
@@ -316,9 +308,14 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
     }
 
     const classified = await _classifyInputs(pwInputs);
-    if (classified.old) await classified.old.fill(oldPassword);
-    if (classified.new)  await classified.new.fill(newPassword);
-    if (classified.confirm) await classified.confirm.fill(newPassword);
+    if (classified.old) await _fillStable(classified.old, oldPassword, 'old password');
+    if (classified.new) await _fillStable(classified.new, newPassword, 'new password');
+    if (classified.confirm) await _fillStable(classified.confirm, newPassword, 'confirm password');
+
+    // Chi bat hien thi sau khi dien xong de khong lam form reset gia tri.
+    if (!headless) {
+      await _revealPasswordFields(page);
+    }
 
     // Trang doi mat khau co the co Turnstile rieng; token o trang dang nhap khong dung lai duoc.
     console.log(`  [ChangePW] Kiem tra Turnstile cua trang doi mat khau...`);
@@ -368,6 +365,33 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+async function _revealPasswordFields(page) {
+  await page.evaluate(() => {
+    document.querySelectorAll('input[type="password"]').forEach(input => {
+      input.type = 'text';
+    });
+  });
+  console.log('  [ChangePW] Da bat hien thi cac truong mat khau (headless=false)');
+}
+
+async function _fillStable(locator, value, label) {
+  await locator.scrollIntoViewIfNeeded();
+  await locator.click();
+  await locator.fill(String(value));
+  await locator.dispatchEvent('input').catch(() => {});
+  await locator.dispatchEvent('change').catch(() => {});
+  await locator.evaluate(el => el.blur()).catch(() => {});
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const actual = await locator.inputValue().catch(() => '');
+  if (actual !== String(value)) {
+    const meta = await locator.evaluate(el => ({
+      name: el.name || '', id: el.id || '', type: el.type || '',
+      maxLength: el.maxLength, actualLength: (el.value || '').length
+    })).catch(() => ({}));
+    throw new Error(`Khong dien duoc truong ${label} (expectedLength=${String(value).length}, actualLength=${meta.actualLength ?? actual.length}, maxLength=${meta.maxLength ?? 'unknown'}, name=${meta.name || '-'}, id=${meta.id || '-'})`);
+  }
+}
 
 async function _pollToken(page, maxWait, interval) {
   const deadline = Date.now() + maxWait;
@@ -448,7 +472,7 @@ async function _findSubmit(page) {
 
 async function _detectResult(page, apiResponses) {
   const meaningfulResponses = apiResponses.filter(r =>
-    !/challenges\.cloudflare\.com|cdn-cgi\/challenge-platform/i.test(r.url || '')
+    !/challenges\.cloudflare\.com|cdn-cgi\/challenge-platform|ingest\.sentry\.io|google-analytics\.com|analytics|telemetry/i.test(r.url || '')
   );
   if (meaningfulResponses.length > 0) {
     const last = meaningfulResponses[meaningfulResponses.length - 1];
