@@ -150,6 +150,7 @@ class App(tk.Tk):
 
         self._running    = False
         self._proc       = None
+        self._chrome_proc = None
         self._rows       = load_csv()
         self._status_map = {}
         self._selected_rows = set()
@@ -592,9 +593,14 @@ class App(tk.Tk):
         idx = int(item)
         if idx in self._selected_rows:
             self._selected_rows.remove(idx)
+            mark = "\u2610"
         else:
             self._selected_rows.add(idx)
-        self._refresh_table()
+            mark = "\u2611"
+        values = list(self._tree.item(item, "values"))
+        if values:
+            values[0] = f"{mark} {idx + 1}"
+            self._tree.item(item, values=values)
         return "break"
 
     def _show_run_scope_dialog(self):
@@ -736,12 +742,15 @@ class App(tk.Tk):
         self._log(f"Updated: {u}", "info")
 
     def _delete_selected(self):
-        sel = self._tree.selection()
-        if not sel:
+        indices = sorted(i for i in self._selected_rows if 0 <= i < len(self._rows))
+        if not indices:
+            indices = sorted(int(item) for item in self._tree.selection())
+        if not indices:
+            messagebox.showinfo("Delete accounts", "Tick at least one account in the Select column first.")
             return
-        if not messagebox.askyesno("Confirm", f"Delete {len(sel)} selected accounts?"):
+        if not messagebox.askyesno("Confirm delete", f"Delete {len(indices)} selected accounts?"):
             return
-        for idx in sorted([int(s) for s in sel], reverse=True):
+        for idx in sorted(indices, reverse=True):
             self._log(f"Deleted: {self._rows[idx]['username']}", "warn")
             del self._rows[idx]
         save_csv(self._rows)
@@ -792,7 +801,7 @@ class App(tk.Tk):
         chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
         user_data = r"C:\tmp\chrome-auto"
         try:
-            subprocess.Popen([
+            self._chrome_proc = subprocess.Popen([
                 chrome,
                 "--remote-debugging-port=9333",
                 f"--user-data-dir={user_data}",
@@ -844,8 +853,8 @@ class App(tk.Tk):
             ):
                 return
             self._launch_chrome()
-            # Cho Chrome bat xong roi moi chay
-            self.after(4000, self._run)
+            # Cho Chrome bat xong roi moi chay, giu nguyen pham vi account da chon.
+            self.after(4000, lambda: self._run(run_indices))
             return
         self._running = True
         try:
@@ -887,13 +896,17 @@ class App(tk.Tk):
                 cmd.append("--headless")
             try:
                 child_env = os.environ.copy()
-                if not child_env.get("AUTOCAPTCHA_KEY"):
-                    try:
-                        import winreg
-                        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as env_key:
-                            child_env["AUTOCAPTCHA_KEY"] = winreg.QueryValueEx(env_key, "AUTOCAPTCHA_KEY")[0]
-                    except (FileNotFoundError, OSError):
-                        pass
+                try:
+                    import winreg
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as env_key:
+                        for env_name in ("AUTOCAPTCHA_KEY", "SHEET_WEB_APP_URL", "SHEET_SYNC_TOKEN"):
+                            if not child_env.get(env_name):
+                                try:
+                                    child_env[env_name] = winreg.QueryValueEx(env_key, env_name)[0]
+                                except FileNotFoundError:
+                                    pass
+                except (FileNotFoundError, OSError):
+                    pass
 
                 proc = subprocess.Popen(
                     cmd,
@@ -969,7 +982,17 @@ class App(tk.Tk):
         self._progress["value"] = self._progress["maximum"]
         self._status_badge.config(text="  READY  ", bg=BG_CARD, fg=TEXT2)
         self._log("Completed!", "ok")
+        self._close_owned_chrome()
         self._load_results()
+
+    def _close_owned_chrome(self):
+        if self._chrome_proc and self._chrome_proc.poll() is None:
+            try:
+                self._chrome_proc.terminate()
+                self._log("Chrome automation da tu dong dung.", "info")
+            except OSError:
+                pass
+        self._chrome_proc = None
 
     def _stop(self):
         if self._proc and self._proc.poll() is None:

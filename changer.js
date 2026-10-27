@@ -17,6 +17,8 @@ const CDP_ENDPOINT  = 'http://localhost:9333';
 const AUTOCAPTCHA_KEY     = process.env.AUTOCAPTCHA_KEY || '';
 const AUTOCAPTCHA_API     = 'https://autocaptcha.pro/apiv3/process';
 const KNOWN_SITEKEY       = '0x4AAAAAAB0ZP2LlQgl9JHy7'; // sitekey cua forum.ngocrongonline.com
+const SHEET_WEB_APP_URL = process.env.SHEET_WEB_APP_URL || '';
+const SHEET_SYNC_TOKEN  = process.env.SHEET_SYNC_TOKEN || '';
 
 const TIMEOUT = {
   NAV:           30000,
@@ -353,6 +355,9 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
     // ── BUOC 5: Ket qua ───────────────────────────────────────────────
     const result = await _detectResult(page, apiResponses);
     await page.close().catch(() => {});
+    if (result.success === true) {
+      await syncPasswordToSheet(username, newPassword);
+    }
     return result;
 
   } catch (err) {
@@ -366,6 +371,33 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+async function syncPasswordToSheet(username, newPassword) {
+  if (!SHEET_WEB_APP_URL) {
+    console.log('  [Sheet] Bo qua: chua cau hinh SHEET_WEB_APP_URL');
+    return;
+  }
+  try {
+    const res = await fetch(SHEET_WEB_APP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'updatePassword',
+        ...(SHEET_SYNC_TOKEN ? { token: SHEET_SYNC_TOKEN } : {}),
+        username,
+        password: newPassword,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok === true) {
+      console.log('  [Sheet] Cap nhat tai khoan/mat khau thanh cong');
+    } else {
+      console.log('  [Sheet] Cap nhat that bai:', data.message || ('HTTP ' + res.status));
+    }
+  } catch (err) {
+    console.log('  [Sheet] Loi dong bo:', err.message);
+  }
+}
+
 async function _revealPasswordFields(page) {
   await page.evaluate(() => {
     document.querySelectorAll('input[type="password"]').forEach(input => {
@@ -377,12 +409,8 @@ async function _revealPasswordFields(page) {
 
 async function _fillStable(locator, value, label) {
   await locator.scrollIntoViewIfNeeded();
-  await locator.click();
   await locator.fill(String(value));
-  await locator.dispatchEvent('input').catch(() => {});
-  await locator.dispatchEvent('change').catch(() => {});
-  await locator.evaluate(el => el.blur()).catch(() => {});
-  await new Promise(resolve => setTimeout(resolve, 250));
+  await new Promise(resolve => setTimeout(resolve, 100));
   const actual = await locator.inputValue().catch(() => '');
   if (actual !== String(value)) {
     const meta = await locator.evaluate(el => ({
