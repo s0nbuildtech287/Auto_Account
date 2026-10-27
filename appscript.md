@@ -513,13 +513,19 @@ function doPost(e) {
     if (!sh) return jsonResponse_({ ok: false, message: 'Sheet not found' });
     const last = lastDataRow_(sh);
     if (last < 2) return jsonResponse_({ ok: false, message: 'No accounts' });
+    const normalize = value => String(value == null ? '' : value).trim().toLowerCase();
     const usernames = sh.getRange(2, COL.TK, last - 1, 1).getDisplayValues().flat();
-    const index = usernames.findIndex(v => String(v).trim() === String(body.username).trim());
-    if (index < 0) return jsonResponse_({ ok: false, message: 'Account not found' });
-    const row = index + 2;
+    const index = usernames.findIndex(v => normalize(v) === normalize(body.username));
     const value = /^\d+$/.test(String(body.password)) ? "'" + body.password : String(body.password);
+    if (index < 0) {
+      const row = last + 1;
+      sh.getRange(row, 1, 1, 3).setValues([[row - 1, String(body.username).trim(), value]]);
+      sh.getRange(row, COL.TK, 1, 2).setNumberFormat('@');
+      return jsonResponse_({ ok: true, created: true, row: row, username: body.username });
+    }
+    const row = index + 2;
     sh.getRange(row, COL.MK).setNumberFormat('@').setValue(value);
-    return jsonResponse_({ ok: true, row: row, username: body.username });
+    return jsonResponse_({ ok: true, created: false, row: row, username: body.username });
   } catch (err) {
     return jsonResponse_({ ok: false, message: err.message || String(err) });
   }
