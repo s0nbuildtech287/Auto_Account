@@ -1,124 +1,124 @@
-# Auto Change Password — Ngọc Rồng Online Forum
+# AutoAccount – Hướng dẫn sử dụng
 
-Tự động đổi mật khẩu hàng loạt tài khoản trên `forum.ngocrongonline.com`.
+## 1. Chuẩn bị
 
----
+Trên máy mới cần có:
 
-## Cài đặt (chỉ cần 1 lần)
+- Google Chrome.
+- File `AutoAccount_Setup.exe`.
+- Extension AutoCaptchaPro.
+- Key AutoCaptchaPro. " 557317e2e25da3bb73689080f71618be "
 
-```bash
-npm install
-npx playwright install chromium
+Không cần cài Node.js hoặc Python khi dùng bản `.exe`.
+
+## 2. Chạy ứng dụng
+
+Chạy:
+
+```text
+AutoAccount_Setup.exe
 ```
 
----
+Lần đầu chạy, ứng dụng tự giải nén runtime vào:
 
-## Chuẩn bị file accounts
-
-Mở file `accounts.csv` và điền danh sách tài khoản:
-
-```csv
-username,old_password,new_password
-acc001,matkhau_cu_001,matkhau_moi_001
-acc002,matkhau_cu_002,matkhau_moi_002
-acc003,matkhau_cu_003,matkhau_moi_003
+```text
+%LOCALAPPDATA%\AutoAccount
 ```
 
-> `username` có thể là số điện thoại, email, hoặc tên đăng nhập.
+Không xóa thư mục này trong khi đang sử dụng.
 
----
+## 3. Cài extension thủ công
 
-## Chạy
+Trong Manager, bấm `Launch` để mở Chrome debug port `9333`, sau đó:
 
-### Bước đầu: Thăm dò với 1 account thật (BẮT BUỘC lần đầu)
+1. Mở `chrome://extensions`.
+2. Bật `Developer mode`.
+3. Chọn `Load unpacked`.
+4. Chọn đúng thư mục có file `manifest.json`:
 
-```bash
-node probe2.js <username> <password>
+```text
+%LOCALAPPDATA%\AutoAccount\Extension\AutocaptchaProExtension
 ```
 
-- Browser sẽ mở ra, tự điền credentials
-- Nếu có Cloudflare Turnstile → tự giải tay
-- Script sẽ in ra selectors của form đổi mật khẩu
-- Lưu `api_log.json` và `session_cookies.json` để debug
+5. Mở extension, nhập key AutoCaptchaPro và bật Cloudflare.
 
-### Chạy thật
+Extension chỉ cần cài một lần trong profile Chrome automation này.
 
-**Headful (mở giao diện browser — an toàn, cần giải captcha tay):**
-```bash
-node run.js
-# hoặc
-npm run headful
+## 4. Cấu hình Google Sheet
+
+Mở PowerShell bình thường, không cần quyền Administrator, rồi chạy:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "SHEET_WEB_APP_URL",
+  "https://script.google.com/macros/s/AKfycbzZbYNQvELg44x5e9WLUeY_mlP1OTKS_DKj5eQWtwyoJMj_smOo5ilRIkv3DV4Ri41I/exec",
+  "User"
+)
 ```
 
-**Headless (ẩn browser — dùng khi đã test OK):**
-```bash
-node run.js --headless --concurrency 3
-# hoặc  
-npm run headless
+Sau đó đóng và mở lại `AutoAccount_Setup.exe`.
+
+Apps Script phải được deploy dạng Web App với quyền truy cập `Anyone`. Khi đổi mật khẩu thành công, app sẽ cập nhật tài khoản ở cột B và mật khẩu mới ở cột C.
+
+## 5. Nhập account
+
+Có hai cách:
+
+- `Single Add`: nhập một account.
+- `Bulk Import`: nhập nhiều account theo dạng:
+
+```text
+username|current_password
 ```
 
-### Các options
+Mật khẩu mới được nhập tại trường `New Password` và website giới hạn tối đa 15 ký tự.
 
-| Flag | Default | Mô tả |
-|------|---------|-------|
-| `--file <path>` | `accounts.csv` | File CSV danh sách accounts |
-| `--headless` | false | Ẩn browser |
-| `--concurrency <n>` | 1 | Số accounts chạy song song |
-| `--output <path>` | `results.json` | File lưu kết quả |
+## 6. Chọn account để chạy
 
----
+1. Tích checkbox ở cột `Select`.
+2. Bấm `CHANGE ALL PASSWORDS`.
+3. Chọn:
+   - `Selected accounts`: chỉ chạy account đã tích.
+   - `All accounts`: chạy toàn bộ.
 
-## Kết quả
+Sau khi chạy xong, Chrome automation do Manager mở sẽ tự đóng. Chrome đã mở sẵn trước đó sẽ không bị đóng.
 
-Sau khi chạy xong, kết quả lưu trong `results.json`:
+## 7. Kết quả
 
-```json
-[
-  {
-    "username": "acc001",
-    "success": true,
-    "message": "Đổi mật khẩu thành công",
-    "timestamp": "2026-10-20T10:00:00.000Z"
-  },
-  {
-    "username": "acc002", 
-    "success": false,
-    "message": "Login thất bại: Sai mật khẩu",
-    "timestamp": "2026-10-20T10:00:05.000Z"
-  }
-]
+- Dòng xanh `✓ Done`: đổi mật khẩu thành công.
+- Dòng đỏ: có lỗi login, form hoặc Cloudflare.
+- Activity Log hiển thị chi tiết từng bước.
+- Kết quả được lưu tại:
+
+```text
+%LOCALAPPDATA%\AutoAccount\results.json
 ```
 
----
+## 8. Lỗi thường gặp
 
-## Lưu ý quan trọng
+### Không thấy extension
 
-### Cloudflare Turnstile (captcha)
-- Trang login có Cloudflare Turnstile
-- Khi chạy **headful** (có giao diện): captcha thường tự giải (Cloudflare nhận diện real browser)
-- Khi chạy **headless**: có thể bị chặn — nếu vậy phải dùng headful
-- Script chờ **60 giây** để giải captcha trước khi timeout
+Kiểm tra đã chọn đúng thư mục có `manifest.json` chưa:
 
-### Concurrency
-- Không nên dùng `--concurrency` > 3 để tránh bị rate-limit
-- Nếu nhiều tài khoản fail cùng lúc → giảm concurrency xuống 1
-
-### Debug
-- Screenshots lỗi lưu trong thư mục `screenshots/`
-- Xem `api_log.json` (từ probe2) để biết API endpoint thật
-
----
-
-## Cấu trúc file
-
+```text
+%LOCALAPPDATA%\AutoAccount\Extension\AutocaptchaProExtension
 ```
-Auto_Account/
-├── accounts.csv     ← ĐIỀN VÀO ĐÂY
-├── run.js           ← Entry point chính
-├── changer.js       ← Core logic
-├── probe.js         ← Thăm dò trang login (selectors)
-├── probe2.js        ← Thăm dò đầy đủ sau khi login
-├── results.json     ← Kết quả (tự tạo sau khi chạy)
-├── screenshots/     ← Screenshots khi lỗi
-└── api_log.json     ← Network log từ probe2
-```
+
+### Thiếu `SHEET_WEB_APP_URL`
+
+Chạy lại lệnh cấu hình URL trong PowerShell rồi khởi động lại Manager.
+
+### `Account not found`
+
+Apps Script bản mới sẽ tự thêm account chưa có vào Sheet. Hãy kiểm tra đã deploy đúng `New version` chưa.
+
+### Không đổi được mật khẩu
+
+Chạy thử một account trước, kiểm tra Activity Log và không chạy đồng thời quá nhiều account. Nên để `Concurrency = 1` khi kiểm tra lỗi.
+
+## 9. Bảo mật
+
+- Không chia sẻ key AutoCaptchaPro.
+- Không chia sẻ URL Web App Google Sheet nếu đang cho phép `Anyone`.
+- Không upload `accounts.csv` có mật khẩu thật lên nơi công khai.
+- File Google Sheet chứa mật khẩu cần được giới hạn quyền truy cập.

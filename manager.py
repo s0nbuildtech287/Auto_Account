@@ -12,10 +12,28 @@ import subprocess
 import threading
 import tempfile
 import json
+import shutil
+import sys
 from datetime import datetime
 
-CSV_FILE     = os.path.join(os.path.dirname(__file__), "accounts.csv")
-RESULTS_FILE = os.path.join(os.path.dirname(__file__), "results.json")
+if getattr(sys, "frozen", False):
+    RESOURCE_DIR = os.path.join(sys._MEIPASS, "runtime")
+    APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "AutoAccount")
+    os.makedirs(APP_DIR, exist_ok=True)
+    for item in ("run.js", "changer.js", "node_modules", "Extension"):
+        src = os.path.join(RESOURCE_DIR, item)
+        dst = os.path.join(APP_DIR, item)
+        if os.path.isdir(src):
+            if not os.path.exists(dst):
+                shutil.copytree(src, dst)
+        elif os.path.isfile(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+else:
+    APP_DIR = os.path.dirname(__file__)
+
+CSV_FILE     = os.path.join(APP_DIR, "accounts.csv")
+RESULTS_FILE = os.path.join(APP_DIR, "results.json")
+NODE_BIN     = os.path.join(APP_DIR, "node.exe") if os.path.exists(os.path.join(APP_DIR, "node.exe")) else "node"
 
 # ── Color palette (modern dark) ───────────────────────────────────────────────
 BG_DARK    = "#0f0f1a"   # nen cung nhat
@@ -869,7 +887,7 @@ class App(tk.Tk):
         run_file = CSV_FILE
         temp_file = None
         if len(run_rows) != len(self._rows):
-            fd, temp_file = tempfile.mkstemp(prefix="selected_accounts_", suffix=".csv", dir=os.path.dirname(__file__))
+            fd, temp_file = tempfile.mkstemp(prefix="selected_accounts_", suffix=".csv", dir=APP_DIR)
             os.close(fd)
             with open(temp_file, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=["username", "old_password", "new_password"])
@@ -890,8 +908,8 @@ class App(tk.Tk):
             "info")
 
         def worker():
-            script = os.path.join(os.path.dirname(__file__), "run.js")
-            cmd = ["node", script, "--file", run_file, "--concurrency", concurrency]
+            script = os.path.join(APP_DIR, "run.js")
+            cmd = [NODE_BIN, script, "--file", run_file, "--concurrency", concurrency]
             if self._headless.get():
                 cmd.append("--headless")
             try:
@@ -912,7 +930,7 @@ class App(tk.Tk):
                     cmd,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace",
-                    cwd=os.path.dirname(__file__),
+                    cwd=APP_DIR,
                     env=child_env)
                 self._proc = proc
                 for line in proc.stdout:
