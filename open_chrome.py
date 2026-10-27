@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-open_chrome.py — Mo Chrome voi remote debugging port 9222
+open_chrome.py — Mo Chrome voi remote debugging port 9333
 Chay: python open_chrome.py
 """
 import subprocess
@@ -9,8 +9,8 @@ import time
 import os
 
 CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-USER_DATA   = os.path.join(os.environ.get("TEMP", r"C:\Temp"), "chrome-auto")
-DEBUG_PORT  = 9222
+USER_DATA   = r"C:\tmp\chrome-auto"
+DEBUG_PORT  = 9333
 
 def is_chrome_running():
     try:

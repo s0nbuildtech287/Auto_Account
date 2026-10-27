@@ -1,7 +1,7 @@
 /**
  * changer.js — Core: dang nhap + doi mat khau 1 tai khoan
  * Dung Chrome that (real browser) qua CDP remote debugging
- * → Cloudflare Turnstile pass binh thuong vi dung Chrome that
+ * Turnstile duoc giai tu dong qua autocaptcha.pro API
  */
 'use strict';
 
@@ -11,45 +11,152 @@ const path = require('path');
 
 const LOGIN_URL     = 'https://forum.ngocrongonline.com/app/dang-nhap';
 const CHANGE_PW_URL = 'https://forum.ngocrongonline.com/app/doi-mat-khau';
-const CDP_ENDPOINT  = 'http://localhost:9222';
+const CDP_ENDPOINT  = 'http://localhost:9333';
+
+// ── autocaptcha.pro config ────────────────────────────────────────────────────
+const AUTOCAPTCHA_KEY     = process.env.AUTOCAPTCHA_KEY || '';
+const AUTOCAPTCHA_API     = 'https://autocaptcha.pro/apiv3/process';
+const KNOWN_SITEKEY       = '0x4AAAAAAB0ZP2LlQgl9JHy7'; // sitekey cua forum.ngocrongonline.com
 
 const TIMEOUT = {
   NAV:           30000,
-  LOGIN_WAIT:    90000,  // cho user pass Turnstile
+  LOGIN_WAIT:    90000,
   ELEMENT:       10000,
   AFTER_SUBMIT:  8000,
-  POLL:          1500,   // poll turnstile token
-  TURNSTILE_MAX: 60000,  // toi da cho turnstile
+  POLL:          1500,
+  TURNSTILE_MAX: 90000,  // cho solver giai
   LOGIN_RETRY:   3,
 };
+
+/**
+ * Giai Cloudflare Turnstile qua autocaptcha.pro
+ * @param {string} pageUrl  - URL cua trang hien tai
+ * @param {string} sitekey  - sitekey cua Turnstile widget
+ * @returns {Promise<string|null>} token neu thanh cong, null neu that bai
+ */
+async function solveTurnstile(pageUrl, sitekey) {
+  if (!AUTOCAPTCHA_KEY) {
+    console.log('  [Solver] Thieu AUTOCAPTCHA_KEY trong bien moi truong');
+    return null;
+  }
+  console.log(`  [Solver] Gui Turnstile task: sitekey=${sitekey}`);
+
+  const body = JSON.stringify({
+    key: AUTOCAPTCHA_KEY,
+    type: 'cloudflare',
+    pageurl: pageUrl,
+    websitekey: sitekey,
+  });
+
+  try {
+    const res = await fetch(AUTOCAPTCHA_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    const data = await res.json();
+    console.log('  [Solver] HTTP '+res.status+' response:', JSON.stringify(data));
+
+    const token = (typeof data.captcha === 'string' ? data.captcha : data.captcha?.token) ||
+      data.token || data.solution?.token || data.data?.captcha || data.data?.token;
+
+    if (res.ok && token) {
+      console.log('  [Solver] Token nhan duoc ('+token.length+' chars)');
+      return token;
+    }
+    console.log('  [Solver] That bai: '+(data.message || data.error || 'Khong co token'));
+    return null;
+  } catch (err) {
+    console.log(`  [Solver] Error: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Lay sitekey cua Turnstile tu trang
+ * @param {import('playwright').Page} page
+ * @returns {Promise<string|null>}
+ */
+async function getTurnstileSitekey(page) {
+  return page.evaluate(() => {
+    // Tim trong iframe src
+    const iframes = document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]');
+    for (const iframe of iframes) {
+      const match = iframe.src.match(/[?&]sitekey=([^&]+)/);
+      if (match) return match[1];
+    }
+    // Tim trong div data-sitekey
+    const divs = document.querySelectorAll('[data-sitekey]');
+    for (const div of divs) {
+      const sk = div.getAttribute('data-sitekey');
+      if (sk) return sk;
+    }
+    // Tim trong script
+    const scripts = document.querySelectorAll('script');
+    for (const s of scripts) {
+      const match = s.textContent.match(/sitekey['":\s]+['"]([0-9a-zA-Z_-]{20,})['"]/);
+      if (match) return match[1];
+    }
+    return null;
+  }).catch(() => null);
+}
+
+/**
+ * Inject token Turnstile vao trang
+ * @param {import('playwright').Page} page
+ * @param {string} token
+ */
+async function injectTurnstileToken(page, token) {
+  await page.evaluate((t) => {
+    // Set vao input hidden cf-turnstile-response
+    const inputs = document.querySelectorAll('input[name="cf-turnstile-response"], [name="cf-turnstile-response"]');
+    inputs.forEach(inp => {
+      inp.value = t;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    // Goi callback data-callback cua widget (trang nay dung onCaptchaSuccess)
+    const widgets = document.querySelectorAll('.cf-turnstile[data-callback]');
+    widgets.forEach(w => {
+      const cb = w.getAttribute('data-callback');
+      if (cb && typeof window[cb] === 'function') {
+        try { window[cb](t); } catch(e) { console.warn('callback err:', e); }
+      }
+    });
+
+    // Fallback: goi cac callback pho bien
+    const callbacks = ['onCaptchaSuccess', 'cfTurnstileCallback', 'turnstileCallback', 'onTurnstileSuccess'];
+    for (const cb of callbacks) {
+      if (typeof window[cb] === 'function') {
+        try { window[cb](t); } catch {}
+      }
+    }
+  }, token).catch(() => {});
+}
 
 /**
  * @param {Object} opts
  * @param {string}  opts.username
  * @param {string}  opts.oldPassword
  * @param {string}  opts.newPassword
- * @param {boolean} opts.headless   — bi bo qua khi dung Chrome that
+ * @param {boolean} opts.headless
  * @param {string}  opts.screenshotDir
  * @returns {Promise<{success: boolean|null, message: string}>}
  */
 async function changePassword({ username, oldPassword, newPassword, headless = false, screenshotDir = 'screenshots' }) {
   let browser, page;
-
   const apiResponses = [];
 
   try {
     // ── Connect vao Chrome that qua CDP ───────────────────────────────
     browser = await chromium.connectOverCDP(CDP_ENDPOINT);
-
-    // Lay context mac dinh (window dang mo)
     const contexts = browser.contexts();
     const context  = contexts.length > 0 ? contexts[0] : await browser.newContext();
 
-    // Mo tab moi de tranh lam phien tab khac
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT.ELEMENT);
 
-    // Intercept responses
     page.on('response', async res => {
       if (['POST', 'PUT', 'PATCH'].includes(res.request().method())) {
         try {
@@ -69,24 +176,65 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT.NAV });
       await page.waitForTimeout(2000);
 
+      try {
+        await page.locator('input[name="user"]').waitFor({ state: 'visible', timeout: TIMEOUT.LOGIN_WAIT });
+        await page.locator('input[name="pass"]').waitFor({ state: 'visible', timeout: TIMEOUT.LOGIN_WAIT });
+      } catch (formError) {
+        throw new Error('Login form unavailable at ' + page.url() + ' (' + formError.message + ')');
+      }
+
+      await page.locator('input[name="user"]').fill(username);
+      await page.waitForTimeout(200);
+      await page.locator('input[name="pass"]').fill(oldPassword);
+      await page.waitForTimeout(500);
+
       // Dien credentials
       await page.fill('input[name="user"]', username);
       await page.waitForTimeout(200);
       await page.fill('input[name="pass"]', oldPassword);
-      await page.waitForTimeout(200);
+      await page.waitForTimeout(500);
 
-      // Cho Turnstile tu resolve (Chrome that → pass rat nhanh)
-      console.log(`  [Turnstile] Cho token...`);
-      const gotToken = await _pollToken(page, TIMEOUT.TURNSTILE_MAX, TIMEOUT.POLL);
-      if (!gotToken) {
-        console.log(`  [Turnstile] Khong lay duoc token — thu submit thang...`);
+      // ── Giai Turnstile ────────────────────────────────────────────
+      // Buoc 1: Thu lay token tu Chrome that (da tu solve)
+      console.log(`  [Turnstile] Kiem tra token tu Chrome...`);
+      let token = await _pollToken(page, 5000, TIMEOUT.POLL);
+
+      if (!token) {
+        // Buoc 2: Dung solver API
+        console.log(`  [Turnstile] Chrome chua co token, dung autocaptcha.pro solver...`);
+        const sitekey = (await getTurnstileSitekey(page)) || KNOWN_SITEKEY;
+        if (sitekey) {
+          console.log(`  [Turnstile] Sitekey: ${sitekey}`);
+          token = await solveTurnstile(page.url(), sitekey);
+          if (token) {
+            await injectTurnstileToken(page, token);
+            await page.waitForTimeout(500);
+            // Verify token da duoc inject
+            const injected = await page.evaluate(() => {
+              const el = document.querySelector('input[name="cf-turnstile-response"]');
+              return el ? el.value : '';
+            }).catch(() => '');
+            console.log(`  [Turnstile] Inject ${injected.length > 0 ? 'OK' : 'FAIL'}`);
+          } else {
+            console.log(`  [Turnstile] Solver that bai, thu submit binh thuong...`);
+          }
+        } else {
+          // Khong tim thay sitekey, co the la managed mode (tu solve)
+          console.log(`  [Turnstile] Khong tim thay sitekey, cho Chrome tu solve (60s)...`);
+          token = await _pollToken(page, TIMEOUT.TURNSTILE_MAX, TIMEOUT.POLL);
+          if (token) {
+            console.log(`  [Turnstile] Chrome tu solve OK!`);
+          } else {
+            console.log(`  [Turnstile] Timeout, thu submit thang...`);
+          }
+        }
       } else {
-        console.log(`  [Turnstile] Token OK!`);
+        console.log(`  [Turnstile] Chrome da co token OK!`);
       }
 
       // Submit
       apiResponses.length = 0;
-      await page.click('button[type="submit"]:has-text("ĐĂNG NHẬP NGAY")');
+      await page.locator('button[type="submit"]').first().click();
 
       try {
         await page.waitForURL(
@@ -100,7 +248,6 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       } catch {
         const errText = await _getErrorText(page);
 
-        // Turnstile fail → retry
         if (_isTurnstileError(errText)) {
           loginError = `Turnstile fail attempt ${attempt}`;
           console.log(`  [Turnstile] Xac minh that bai, retry...`);
@@ -108,7 +255,6 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
           continue;
         }
 
-        // Sai mat khau → khong retry
         const apiResp = apiResponses.find(r =>
           r.url.includes('login') || r.url.includes('auth') || r.url.includes('dang-nhap'));
         const apiMsg = apiResp?.body?.message || apiResp?.body?.error || '';
@@ -180,9 +326,6 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       await page.close().catch(() => {});
     }
     return { success: false, message: `Exception: ${err.message}` };
-  } finally {
-    // KHONG dong browser — vi la Chrome that dang chay
-    // chi close tab (da dong o tren)
   }
 }
 
@@ -195,10 +338,10 @@ async function _pollToken(page, maxWait, interval) {
       const el = document.querySelector('input[name="cf-turnstile-response"]');
       return el ? el.value : '';
     }).catch(() => '');
-    if (token && token.length > 10) return true;
+    if (token && token.length > 10) return token;
     await page.waitForTimeout(interval);
   }
-  return false;
+  return null;
 }
 
 async function _getErrorText(page) {
@@ -236,7 +379,6 @@ async function _classifyInputs(inputs) {
       result.new = result.new || input;
     }
   }
-  // Fallback theo thu tu
   if (!result.new) {
     if (inputs.length === 3) [result.old, result.new, result.confirm] = inputs;
     else if (inputs.length === 2) [result.new, result.confirm] = inputs;
@@ -267,7 +409,6 @@ async function _findSubmit(page) {
 }
 
 async function _detectResult(page, apiResponses) {
-  // Uu tien ket qua tu API response
   if (apiResponses.length > 0) {
     const last = apiResponses[apiResponses.length - 1];
     const body = last.body;
@@ -285,7 +426,6 @@ async function _detectResult(page, apiResponses) {
     }
   }
 
-  // Fallback: doc text trang
   const text  = await page.evaluate(() => document.body.innerText).catch(() => '');
   const lower = text.toLowerCase();
   if (/thành công|doi mat khau thanh cong|cap nhat thanh cong|success/.test(lower))

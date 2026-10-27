@@ -133,15 +133,18 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Auto Password Manager — Ngoc Rong Online")
-        self.geometry("980x720")
-        self.minsize(840, 600)
         self.configure(bg=BG_DARK)
         self.resizable(True, True)
 
-        w, h = 980, 720
+        # Tu dong fit 90% man hinh, toi da 1200x800
         self.update_idletasks()
-        x = (self.winfo_screenwidth()  - w) // 2
-        y = (self.winfo_screenheight() - h) // 2
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w  = min(int(sw * 0.90), 1200)
+        h  = min(int(sh * 0.88), 800)
+        self.minsize(700, 520)
+        x  = (sw - w) // 2
+        y  = (sh - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
 
         self._running    = False
@@ -220,18 +223,19 @@ class App(tk.Tk):
                                     font=F_SMALL, bg=BG, fg=TEXT2)
         self._lbl_count.place(relx=1.0, x=-110, rely=0.5, anchor="e")
 
-        # ── Body ──
-        body = tk.Frame(self, bg=BG_DARK)
+        # ── Body — dung PanedWindow de co gian theo man hinh ──
+        body = tk.PanedWindow(self, orient="horizontal", bg=BG_DARK,
+                              sashwidth=6, sashrelief="flat",
+                              handlesize=0, bd=0)
         body.pack(fill="both", expand=True, padx=18, pady=14)
 
-        # Left column — dung PanedWindow de tabs co the thu nho
-        left = tk.Frame(body, bg=BG_DARK, width=300)
-        left.pack(side="left", fill="y", padx=(0, 14))
-        left.pack_propagate(False)
+        # Left column — co gian, chieu rong toi thieu 260, mac dinh 300
+        left = tk.Frame(body, bg=BG_DARK)
+        body.add(left, minsize=260, width=300, stretch="never")
 
         # Right column
         right = tk.Frame(body, bg=BG_DARK)
-        right.pack(side="left", fill="both", expand=True)
+        body.add(right, minsize=300, stretch="always")
 
         # Run panel luon o duoi, fixed height
         self._build_run_panel(left)
@@ -304,38 +308,62 @@ class App(tk.Tk):
 
     # ── Tab 2: bulk import ─────────────────────────────────────────────────────
     def _build_bulk_import(self, parent):
-        card = Card(parent, padx=16, pady=16)
-        card.pack(fill="both", expand=True)
+        # Canvas + scrollbar de cuon duoc khi man hinh nho
+        canvas = tk.Canvas(parent, bg=BG_CARD, bd=0, highlightthickness=0)
+        vsb    = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
 
-        SectionLabel(card, "Bulk Import").pack(anchor="w", pady=(0, 8))
+        card = tk.Frame(canvas, bg=BG_CARD)
+        card_win = canvas.create_window((0, 0), window=card, anchor="nw")
+
+        def _on_resize(e):
+            canvas.itemconfig(card_win, width=e.width)
+        canvas.bind("<Configure>", _on_resize)
+
+        def _on_frame_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        card.bind("<Configure>", _on_frame_configure)
+
+        # Scroll bang mouse wheel
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # ── Noi dung ──
+        PX = 16  # padding trai phai
+
+        tk.Frame(card, bg=BG_CARD, height=12).pack()
+        SectionLabel(card, "Bulk Import", bg=BG_CARD).pack(anchor="w", padx=PX, pady=(0, 6))
 
         hint = ("Paste accounts below — one per line:\n"
                 "  account1/oldpass1\n"
                 "  account2/oldpass2\n"
                 "Separators:  /  |  :  tab  space")
         tk.Label(card, text=hint, font=(F_MONO[0], 8), bg=BG_CARD, fg=TEXT3,
-                 justify="left").pack(anchor="w", pady=(0, 8))
+                 justify="left").pack(anchor="w", padx=PX, pady=(0, 8))
 
         # Text area
-        tk.Label(card, text="ACCOUNTS LIST", font=F_TINY, bg=BG_CARD, fg=TEXT3).pack(anchor="w")
+        tk.Label(card, text="ACCOUNTS LIST", font=F_TINY, bg=BG_CARD, fg=TEXT3).pack(anchor="w", padx=PX)
         txt_wrap = tk.Frame(card, bg=BORDER)
-        txt_wrap.pack(fill="both", expand=True, pady=(3, 10))
+        txt_wrap.pack(fill="x", pady=(3, 10), padx=PX)
 
         self._bulk_text = tk.Text(txt_wrap, font=F_MONO,
                                    bg=BG_INPUT, fg=TEXT, insertbackground=TEXT,
                                    relief="flat", bd=0, wrap="none",
-                                   padx=8, pady=6, undo=True,
+                                   padx=8, pady=6, undo=True, height=8,
                                    selectbackground=ACCENT_DK, selectforeground="#fff")
         sb = ttk.Scrollbar(txt_wrap, orient="vertical", command=self._bulk_text.yview)
         self._bulk_text.configure(yscrollcommand=sb.set)
-        self._bulk_text.pack(side="left", fill="both", expand=True)
+        self._bulk_text.pack(side="left", fill="x", expand=True)
         sb.pack(side="right", fill="y")
 
         # New password field
         tk.Label(card, text="NEW PASSWORD (applies to all)", font=F_TINY,
-                 bg=BG_CARD, fg=TEXT3).pack(anchor="w")
+                 bg=BG_CARD, fg=TEXT3).pack(anchor="w", padx=PX)
         pw_row = tk.Frame(card, bg=BG_CARD)
-        pw_row.pack(fill="x", pady=(3, 8))
+        pw_row.pack(fill="x", pady=(3, 8), padx=16)
 
         self._bulk_newpw = tk.StringVar()
         self._bulk_newpw_w = tk.Entry(pw_row, textvariable=self._bulk_newpw,
@@ -354,12 +382,12 @@ class App(tk.Tk):
 
         # Preview
         self._bulk_preview = tk.Label(card, text="", font=F_SMALL, bg=BG_CARD, fg=TEXT3)
-        self._bulk_preview.pack(anchor="w", pady=(0, 4))
+        self._bulk_preview.pack(anchor="w", padx=PX, pady=(0, 4))
         self._bulk_text.bind("<KeyRelease>", self._update_bulk_preview)
 
         # Import mode
         mode_row = tk.Frame(card, bg=BG_CARD)
-        mode_row.pack(fill="x", pady=(0, 10))
+        mode_row.pack(fill="x", pady=(0, 8), padx=PX)
         tk.Label(mode_row, text="Mode:", font=F_SMALL, bg=BG_CARD, fg=TEXT2).pack(side="left")
         self._import_mode = tk.StringVar(value="append")
         tk.Radiobutton(mode_row, text="Append", variable=self._import_mode,
@@ -372,7 +400,7 @@ class App(tk.Tk):
         # Import button
         HoverButton(card, text="  IMPORT ACCOUNTS  ", font=F_BODY_B,
                     bg_normal=ACCENT, bg_hover=ACCENT_DK, fg="#ffffff",
-                    command=self._do_bulk_import).pack(fill="x", ipady=9)
+                    command=self._do_bulk_import).pack(fill="x", ipady=9, padx=16, pady=(0, 16))
 
     def _update_bulk_preview(self, event=None):
         text = self._bulk_text.get("1.0", "end")
@@ -693,7 +721,7 @@ class App(tk.Tk):
     def _is_chrome_running(self):
         try:
             import urllib.request
-            urllib.request.urlopen("http://localhost:9222/json/version", timeout=1)
+            urllib.request.urlopen("http://localhost:9333/json/version", timeout=1)
             return True
         except:
             return False
@@ -703,11 +731,11 @@ class App(tk.Tk):
             self._log("Chrome debug da chay roi!", "ok")
             return
         chrome = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-        user_data = os.path.join(os.environ.get("TEMP", r"C:\Temp"), "chrome-auto")
+        user_data = r"C:\tmp\chrome-auto"
         try:
             subprocess.Popen([
                 chrome,
-                "--remote-debugging-port=9222",
+                "--remote-debugging-port=9333",
                 f"--user-data-dir={user_data}",
                 "--no-first-run",
                 "--no-default-browser-check",
@@ -723,7 +751,7 @@ class App(tk.Tk):
         ok = self._is_chrome_running()
         if ok:
             self._chrome_dot.config(fg=SUCCESS)
-            self._chrome_lbl.config(text=" Chrome: ready (port 9222)", fg=SUCCESS)
+            self._chrome_lbl.config(text=" Chrome: ready (port 9333)", fg=SUCCESS)
             self._btn_chrome.config(text=" OK ", state="disabled")
             self._btn_chrome.set_colors(SUCCESS_DK, SUCCESS_DK)
         else:
@@ -743,7 +771,7 @@ class App(tk.Tk):
         if not self._is_chrome_running():
             if not messagebox.askyesno(
                 "Chrome chua chay",
-                "Chrome debug (port 9222) chua duoc bat.\n\n"
+                "Chrome debug (port 9333) chua duoc bat.\n\n"
                 "Bam 'Yes' de tu dong bat Chrome roi chay.\n"
                 "Bam 'No' de huy."
             ):
