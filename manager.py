@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import threading
+import tempfile
 import json
 from datetime import datetime
 
@@ -151,6 +152,7 @@ class App(tk.Tk):
         self._proc       = None
         self._rows       = load_csv()
         self._status_map = {}
+        self._selected_rows = set()
 
         self._setup_styles()
         self._build_ui()
@@ -551,8 +553,8 @@ class App(tk.Tk):
 
         # Treeview
         cols   = ("idx", "username", "old_pw", "new_pw", "status")
-        widths = {"idx": 40, "username": 200, "old_pw": 140, "new_pw": 140, "status": 130}
-        labels = {"idx": "#", "username": "Username", "old_pw": "Old Password",
+        widths = {"idx": 60, "username": 200, "old_pw": 140, "new_pw": 140, "status": 130}
+        labels = {"idx": "Select", "username": "Username", "old_pw": "Old Password",
                   "new_pw": "New Password", "status": "Status"}
 
         tv_wrap = tk.Frame(parent, bg=BORDER)
@@ -564,9 +566,9 @@ class App(tk.Tk):
             self._tree.heading(col, text=labels[col], anchor="w")
             self._tree.column(col, width=widths[col], minwidth=widths[col], anchor="w")
 
-        self._tree.tag_configure("success", foreground=SUCCESS)
-        self._tree.tag_configure("fail",    foreground=DANGER)
-        self._tree.tag_configure("pending", foreground=WARNING)
+        self._tree.tag_configure("success", foreground="#8ff0ad", background="#163d2a")
+        self._tree.tag_configure("fail",    foreground="#ff8f9a", background="#43232b")
+        self._tree.tag_configure("pending", foreground=WARNING, background="#403719")
         self._tree.tag_configure("odd",     background=BG_CARD)
         self._tree.tag_configure("even",    background="#1a1a2c")
 
@@ -576,8 +578,59 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y")
 
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
+        self._tree.bind("<Button-1>", self._on_tree_click, add="+")
 
     # ── Log panel ──────────────────────────────────────────────────────────────
+    def _on_tree_click(self, event):
+        if self._tree.identify_region(event.x, event.y) != "cell":
+            return
+        if self._tree.identify_column(event.x) != "#1":
+            return
+        item = self._tree.identify_row(event.y)
+        if not item:
+            return
+        idx = int(item)
+        if idx in self._selected_rows:
+            self._selected_rows.remove(idx)
+        else:
+            self._selected_rows.add(idx)
+        self._refresh_table()
+        return "break"
+
+    def _show_run_scope_dialog(self):
+        if not self._rows:
+            messagebox.showwarning("Empty list", "No accounts in the list.")
+            return
+        selected = sorted(i for i in self._selected_rows if 0 <= i < len(self._rows))
+        dialog = tk.Toplevel(self)
+        dialog.title("Change password scope")
+        dialog.configure(bg=BG_CARD)
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        tk.Label(dialog, text="Choose accounts to process", font=F_H2,
+                 bg=BG_CARD, fg=TEXT).pack(padx=24, pady=(20, 6))
+        tk.Label(dialog, text=f"Selected: {len(selected)} | All: {len(self._rows)}",
+                 font=F_SMALL, bg=BG_CARD, fg=TEXT2).pack(padx=24, pady=(0, 16))
+        row = tk.Frame(dialog, bg=BG_CARD)
+        row.pack(padx=20, pady=(0, 20), fill="x")
+        def choose(indices):
+            dialog.destroy()
+            self._run(indices)
+        HoverButton(row, text=" Selected accounts ", font=F_BODY_B,
+                    bg_normal=SUCCESS if selected else BG_INPUT,
+                    bg_hover=SUCCESS_DK if selected else BG_HOVER,
+                    fg="#0f0f1a" if selected else TEXT2,
+                    command=lambda: choose(selected),
+                    state="normal" if selected else "disabled").pack(side="left", padx=(0, 8), ipady=7)
+        HoverButton(row, text=" All accounts ", font=F_BODY_B,
+                    bg_normal=ACCENT, bg_hover=ACCENT_DK, fg="#ffffff",
+                    command=lambda: choose(list(range(len(self._rows))))).pack(side="left", ipady=7)
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
     def _build_log(self, parent):
         lf = tk.Frame(parent, bg=BG_DARK)
         lf.pack(fill="x", pady=(10, 0))
@@ -619,7 +672,7 @@ class App(tk.Tk):
         sm = status_map or self._status_map
         for i, row in enumerate(self._rows):
             st  = sm.get(i, "")
-            if st == "OK":
+            if st == "OK" or st.startswith("?") or "Done" in st:
                 tag = "success"
             elif st and st != "\u2014":
                 tag = "fail"
@@ -627,8 +680,9 @@ class App(tk.Tk):
                 tag = "odd" if i % 2 == 0 else "even"
             old_m = "\u25CF" * min(len(row["old_password"]), 12)
             new_m = "\u25CF" * min(len(row["new_password"]), 12)
+            mark = "\u2611" if i in self._selected_rows else "\u2610"
             self._tree.insert("", "end", iid=str(i),
-                               values=(i + 1, row["username"], old_m, new_m, st or "\u2014"),
+                               values=(f"{mark} {i + 1}", row["username"], old_m, new_m, st or "\u2014"),
                                tags=(tag,))
         self._lbl_count.config(text=f"{len(self._rows)} accounts")
 
@@ -692,6 +746,7 @@ class App(tk.Tk):
             del self._rows[idx]
         save_csv(self._rows)
         self._status_map = {}
+        self._selected_rows.clear()
         self._refresh_table()
         self._clear_form()
 
@@ -766,7 +821,15 @@ class App(tk.Tk):
         self.after(3000, self._poll_chrome_status)
 
     # ── Run / Stop ────────────────────────────────────────────────────────────
-    def _run(self):
+    def _run(self, run_indices=None):
+        if run_indices is None:
+            self._show_run_scope_dialog()
+            return
+        run_indices = sorted(set(run_indices))
+        run_rows = [self._rows[i] for i in run_indices if 0 <= i < len(self._rows)]
+        if not run_rows:
+            messagebox.showwarning("No selection", "Select at least one account first.")
+            return
         if not self._rows:
             messagebox.showwarning("Empty list", "No accounts in the list.")
             return
@@ -785,9 +848,25 @@ class App(tk.Tk):
             self.after(4000, self._run)
             return
         self._running = True
+        try:
+            with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f)
+        except OSError:
+            pass
         self._status_map = {}
         self._progress["value"] = 0
-        self._progress["maximum"] = len(self._rows)
+        self._progress["maximum"] = len(run_rows)
+
+        run_file = CSV_FILE
+        temp_file = None
+        if len(run_rows) != len(self._rows):
+            fd, temp_file = tempfile.mkstemp(prefix="selected_accounts_", suffix=".csv", dir=os.path.dirname(__file__))
+            os.close(fd)
+            with open(temp_file, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["username", "old_password", "new_password"])
+                writer.writeheader()
+                writer.writerows(run_rows)
+            run_file = temp_file
         self._btn_run.config(state="disabled")
         self._btn_run.set_colors("#3a3a4a", "#3a3a4a")
         self._btn_stop.config(state="normal")
@@ -796,14 +875,14 @@ class App(tk.Tk):
         concurrency = str(self._concurrency.get())
         self._log("=" * 50, "info")
         self._log(
-            f"Started: {len(self._rows)} accounts | "
+            f"Started: {len(run_rows)} accounts | "
             f"concurrency={concurrency} | "
             f"headless={self._headless.get()}",
             "info")
 
         def worker():
             script = os.path.join(os.path.dirname(__file__), "run.js")
-            cmd = ["node", script, "--concurrency", concurrency]
+            cmd = ["node", script, "--file", run_file, "--concurrency", concurrency]
             if self._headless.get():
                 cmd.append("--headless")
             try:
@@ -838,6 +917,11 @@ class App(tk.Tk):
                         tag = "info"
                     self.after(0, lambda l=line, t=tag: self._log(l, t))
                 proc.wait()
+                if temp_file:
+                    try:
+                        os.remove(temp_file)
+                    except OSError:
+                        pass
                 self.after(0, self._on_done)
             except Exception as e:
                 self.after(0, lambda: self._log(f"Error: {e}", "fail"))
