@@ -590,16 +590,20 @@ class App(tk.Tk):
                     command=self._clear_log).pack(side="right")
 
         log_wrap = tk.Frame(lf, bg=BORDER)
-        log_wrap.pack(fill="x")
+        log_wrap.pack(fill="both")
 
-        self._log_text = tk.Text(log_wrap, height=6, font=F_MONO,
+        self._log_text = tk.Text(log_wrap, height=12, font=F_MONO,
                                   bg=BG, fg=TEXT2,
                                   relief="flat", bd=0,
                                   state="disabled", wrap="word",
                                   padx=10, pady=8,
                                   insertbackground=TEXT,
                                   selectbackground=ACCENT_DK, selectforeground="#fff")
-        self._log_text.pack(fill="x")
+        log_scroll = ttk.Scrollbar(log_wrap, orient="vertical", command=self._log_text.yview)
+        self._log_text.configure(yscrollcommand=log_scroll.set)
+        self._log_text.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+
         for tag, color in [("ok", SUCCESS), ("fail", DANGER),
                            ("warn", WARNING), ("info", TEXT2)]:
             self._log_text.tag_configure(tag, foreground=color)
@@ -803,11 +807,21 @@ class App(tk.Tk):
             if self._headless.get():
                 cmd.append("--headless")
             try:
+                child_env = os.environ.copy()
+                if not child_env.get("AUTOCAPTCHA_KEY"):
+                    try:
+                        import winreg
+                        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as env_key:
+                            child_env["AUTOCAPTCHA_KEY"] = winreg.QueryValueEx(env_key, "AUTOCAPTCHA_KEY")[0]
+                    except (FileNotFoundError, OSError):
+                        pass
+
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace",
-                    cwd=os.path.dirname(__file__))
+                    cwd=os.path.dirname(__file__),
+                    env=child_env)
                 self._proc = proc
                 for line in proc.stdout:
                     line = line.rstrip()

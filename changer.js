@@ -154,14 +154,31 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
     const contexts = browser.contexts();
     const context  = contexts.length > 0 ? contexts[0] : await browser.newContext();
 
+    // Profile automation co the dang giu session account truoc do.
+    // Xoa session trong context rieng truoc moi account de tranh redirect thang vao dien-dan-0.
+    await context.clearCookies();
+    for (const existingPage of context.pages()) {
+      try {
+        if (existingPage.url().includes("ngocrongonline.com")) {
+          await existingPage.evaluate(() => {
+            localStorage.clear();
+            sessionStorage.clear();
+          });
+        }
+      } catch {}
+    }
+
     page = await context.newPage();
     page.setDefaultTimeout(TIMEOUT.ELEMENT);
 
     page.on('response', async res => {
-      if (['POST', 'PUT', 'PATCH'].includes(res.request().method())) {
+      const method = res.request().method();
+      if (['POST', 'PUT', 'PATCH'].includes(method)) {
         try {
-          const json = await res.json();
-          apiResponses.push({ url: res.url(), status: res.status(), body: json });
+          const raw = await res.text();
+          let body = raw;
+          try { body = JSON.parse(raw); } catch {}
+          apiResponses.push({ url: res.url(), status: res.status(), method, body });
         } catch {}
       }
     });
@@ -281,8 +298,9 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
     apiResponses.length = 0;
 
     // ── BUOC 2: Mo trang doi mat khau ────────────────────────────────
-    await page.goto(CHANGE_PW_URL, { waitUntil: 'networkidle', timeout: TIMEOUT.NAV });
-    await page.waitForTimeout(1500);
+    console.log(`  [ChangePW] Mo trang doi mat khau...`);
+    await page.goto(CHANGE_PW_URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT.NAV });
+    await page.waitForTimeout(2000);
 
     if (!page.url().includes('doi-mat-khau')) {
       await page.close().catch(() => {});
@@ -302,6 +320,24 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
     if (classified.new)  await classified.new.fill(newPassword);
     if (classified.confirm) await classified.confirm.fill(newPassword);
 
+    // Trang doi mat khau co the co Turnstile rieng; token o trang dang nhap khong dung lai duoc.
+    console.log(`  [ChangePW] Kiem tra Turnstile cua trang doi mat khau...`);
+    let changeToken = await _pollToken(page, 20000, TIMEOUT.POLL);
+    if (!changeToken) {
+      const changeSitekey = (await getTurnstileSitekey(page)) || KNOWN_SITEKEY;
+      console.log(`  [ChangePW] Sitekey: ${changeSitekey}`);
+      changeToken = await solveTurnstile(page.url(), changeSitekey);
+      if (changeToken) {
+        await injectTurnstileToken(page, changeToken);
+        await page.waitForTimeout(500);
+        console.log(`  [ChangePW] Turnstile trang doi mat khau: Inject OK`);
+      } else {
+        console.log(`  [ChangePW] Khong lay duoc token Turnstile trang doi mat khau`);
+      }
+    } else {
+      console.log(`  [ChangePW] Turnstile trang doi mat khau da co token`);
+    }
+
     await page.waitForTimeout(400);
 
     // ── BUOC 4: Submit ────────────────────────────────────────────────
@@ -312,8 +348,10 @@ async function changePassword({ username, oldPassword, newPassword, headless = f
       return { success: false, message: 'Khong tim thay nut submit' };
     }
 
+    console.log(`  [ChangePW] Da dien form, dang bam nut doi mat khau...`);
     await submitBtn.click();
     await page.waitForTimeout(TIMEOUT.AFTER_SUBMIT);
+    console.log(`  [ChangePW] Da submit, dang kiem tra ket qua...`);
 
     // ── BUOC 5: Ket qua ───────────────────────────────────────────────
     const result = await _detectResult(page, apiResponses);
@@ -409,20 +447,33 @@ async function _findSubmit(page) {
 }
 
 async function _detectResult(page, apiResponses) {
-  if (apiResponses.length > 0) {
-    const last = apiResponses[apiResponses.length - 1];
+  const meaningfulResponses = apiResponses.filter(r =>
+    !/challenges\.cloudflare\.com|cdn-cgi\/challenge-platform/i.test(r.url || '')
+  );
+  if (meaningfulResponses.length > 0) {
+    const last = meaningfulResponses[meaningfulResponses.length - 1];
     const body = last.body;
-    const msg  = body?.message || body?.msg || body?.data?.message || '';
+    const msg  = typeof body === 'string'
+      ? body.replace(/\s+/g, ' ').slice(0, 300)
+      : (body?.message || body?.msg || body?.data?.message || '');
+    const bodyText = typeof body === 'string' ? body : JSON.stringify(body || {});
+    console.log(`  [ChangePW] Response ${last.status} ${last.method || ''} ${last.url}`);
+    console.log(`  [ChangePW] Response body: ${msg || bodyText.slice(0, 300)}`);
 
     if (last.status >= 200 && last.status < 300) {
-      const ok   = body?.success === true || /thanh.cong|success/i.test(msg);
-      const fail = body?.success === false || /that.bai|loi|error|fail/i.test(msg);
+      const isCloudflareChallenge = /challenges\.cloudflare\.com|cdn-cgi\/challenge-platform/i.test(last.url);
+      if (isCloudflareChallenge) {
+        return { success: false, message: 'Cloudflare challenge chan request doi mat khau' };
+      }
+      const ok   = body?.success === true || /thanh.cong|th?nh c?ng|doi mat khau thanh cong|success/i.test(msg);
+      const fail = body?.success === false || /that bai|th?t b?i|sai mat khau|sai m?t kh?u|loi|l?i|error|fail|failure/i.test(msg);
       if (ok)   return { success: true,  message: `Doi mat khau thanh cong: ${msg || 'OK'}` };
-      if (fail) return { success: false, message: `Doi mat khau that bai: ${msg}` };
-      return { success: true, message: `Submitted (HTTP ${last.status})` };
+      if (fail) return { success: false, message: `Doi mat khau that bai: ${msg || bodyText.slice(0, 160)}` };
+      await _screenshot(page, 'screenshots', `unknown_${Date.now()}`);
+      return { success: null, message: `HTTP ${last.status} nhung khong co xac nhan thanh cong` };
     }
     if (last.status >= 400) {
-      return { success: false, message: `HTTP ${last.status}: ${msg || JSON.stringify(body).slice(0,80)}` };
+      return { success: false, message: `HTTP ${last.status}: ${msg || bodyText.slice(0, 160)}` };
     }
   }
 
