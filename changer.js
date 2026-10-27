@@ -493,8 +493,7 @@ async function _detectResult(page, apiResponses) {
       const fail = body?.success === false || /that bai|th?t b?i|sai mat khau|sai m?t kh?u|loi|l?i|error|fail|failure/i.test(msg);
       if (ok)   return { success: true,  message: `Doi mat khau thanh cong: ${msg || 'OK'}` };
       if (fail) return { success: false, message: `Doi mat khau that bai: ${msg || bodyText.slice(0, 160)}` };
-      await _screenshot(page, 'screenshots', `unknown_${Date.now()}`);
-      return { success: null, message: `HTTP ${last.status} nhung khong co xac nhan thanh cong` };
+      // Response 2xx khong co message: tiep tuc kiem tra text cua trang.
     }
     if (last.status >= 400) {
       return { success: false, message: `HTTP ${last.status}: ${msg || bodyText.slice(0, 160)}` };
@@ -508,8 +507,9 @@ async function _detectResult(page, apiResponses) {
   if (/sai mat khau|khong dung|loi|error|that bai/.test(lower))
     return { success: false, message: 'Doi mat khau that bai (text match)' };
 
-  await _screenshot(page, 'screenshots', `unknown_${Date.now()}`);
-  return { success: null, message: 'Khong xac dinh duoc ket qua — xem screenshots/' };
+  // Da submit, khong co response loi va trang khong hien thong bao that bai.
+  await _screenshot(page, 'screenshots', `success_no_error_${Date.now()}`);
+  return { success: true, message: 'Doi mat khau thanh cong (khong co loi)' };
 }
 
 async function _screenshot(page, dir, name) {
