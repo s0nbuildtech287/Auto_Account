@@ -520,11 +520,12 @@ function doPost(e) {
     if (index < 0) {
       const row = last + 1;
       sh.getRange(row, 1, 1, 3).setValues([[row - 1, String(body.username).trim(), value]]);
-      sh.getRange(row, COL.TK, 1, 2).setNumberFormat('@');
+      sh.getRange(row, COL.TK).setNumberFormat('@');
+      sh.getRange(row, COL.MK).setNumberFormat(MASK_FORMAT);
       return jsonResponse_({ ok: true, created: true, row: row, username: body.username });
     }
     const row = index + 2;
-    sh.getRange(row, COL.MK).setNumberFormat('@').setValue(value);
+    sh.getRange(row, COL.MK).setNumberFormat(MASK_FORMAT).setValue(value);
     return jsonResponse_({ ok: true, created: false, row: row, username: body.username });
   } catch (err) {
     return jsonResponse_({ ok: false, message: err.message || String(err) });
